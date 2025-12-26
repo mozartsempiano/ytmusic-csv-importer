@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         yt-csv-importer
+// @name         ytmusic-csv-importer
 // @namespace    http://tampermonkey.net/
 // @version      1.0
-// @description  Import songs from a CSV file to a YouTube Music playlist
+// @description  Automatically import songs from a CSV file to a YouTube Music playlist
 // @author       mozartsempiano
 // @match        https://music.youtube.com/*
 // @grant        none
