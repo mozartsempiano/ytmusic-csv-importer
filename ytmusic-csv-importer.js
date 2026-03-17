@@ -258,7 +258,9 @@
 			titleInput.focus();
 			titleInput.value = playlistName;
 			titleInput.dispatchEvent(new Event("input", { bubbles: true }));
-			await sleep(200);
+			await waitFor(() => titleInput.value === playlistName, 1500).catch(
+				() => {},
+			);
 			const createBtn = Array.from(
 				document.querySelectorAll('button[aria-label="' + t("create") + '"]'),
 			).find((btn) => btn.offsetParent !== null);
@@ -274,8 +276,13 @@
 			return;
 		}
 
-		await sleep(4000);
-		log("Waiting a bit before starting search...");
+		await waitFor(
+			() =>
+				isVisible(document.querySelector(".ytmusic-search-box input")) &&
+				!isVisible(document.querySelector("ytmusic-playlist-form")),
+			12000,
+		).catch(() => {});
+		log("Playlist criada; iniciando busca...");
 
 		let success = 0;
 		let fail = 0;
@@ -312,7 +319,7 @@
 			return false;
 		}
 		const searchValue = `${trackName} ${artist}`;
-		await sleep(1000);
+		const beforeResultsKey = getFirstVisibleResultKey();
 		searchBox.value = searchValue;
 		searchBox.dispatchEvent(new Event("input", { bubbles: true }));
 		await waitFor(() => searchBox.value === searchValue, 2000);
@@ -320,7 +327,6 @@
 
 		// Ensure the field is focused before sending Enter
 		searchBox.focus();
-		await sleep(200);
 
 		let entered = false;
 		for (let attempt = 1; attempt <= 2 && !entered; attempt++) {
@@ -357,7 +363,6 @@
 						bubbles: true,
 					}),
 				);
-				await sleep(200);
 				// Try to submit the form if it exists
 				if (searchBox.form) {
 					if (debug) log("Trying to submit searchBox form");
@@ -374,22 +379,21 @@
 						e,
 					);
 				if (attempt < 2) {
-					if (debug) log("Trying again in 2s...");
-					await sleep(2000);
+					if (debug) log("Trying again...");
+					await waitFor(() => !searchBox.disabled, 800).catch(() => {});
 				}
 			}
-			if (!entered) await sleep(1000);
 		}
 		if (!entered) {
 			if (debug) log("Failed to send Enter/keypress after 2 attempts");
 		}
 
 		if (debug) log("Waiting for results...");
+		await waitForSearchResults(searchValue, beforeResultsKey).catch(() => {});
 		await waitFor(
 			() => document.querySelector("ytmusic-shelf-renderer"),
 			10000,
 		);
-		await sleep(1000);
 		await clickSongsFilter();
 		const saveDialogOpened = await openSaveToPlaylistDialog(trackName, artist);
 		if (!saveDialogOpened) {
@@ -412,7 +416,9 @@
 		if (playlistBtn) {
 			if (debug) log(`Clicking playlist: ${playlistName}`);
 			playlistBtn.click();
-			await sleep(200);
+			await waitFor(() => !document.querySelector("#playlists"), 4000).catch(
+				() => {},
+			);
 			return true;
 		}
 
@@ -457,7 +463,6 @@
 			() => songsChip.getAttribute?.("aria-selected") === "true",
 			3000,
 		).catch(() => {});
-		await sleep(700);
 		return true;
 	}
 
@@ -589,6 +594,42 @@
 			.filter((entry) => entry.text);
 	}
 
+	function getCurrentSearchQuery() {
+		const params = new URLSearchParams(window.location.search);
+		return params.get("q") || params.get("query") || "";
+	}
+
+	function hasVisibleSearchResults() {
+		return Array.from(
+			document.querySelectorAll("ytmusic-responsive-list-item-renderer"),
+		).some(isVisible);
+	}
+
+	function getFirstVisibleResultKey() {
+		const firstVisible = Array.from(
+			document.querySelectorAll("ytmusic-responsive-list-item-renderer"),
+		).find(isVisible);
+		if (!firstVisible) return "";
+		return normalizeText(firstVisible.textContent).slice(0, 120);
+	}
+
+	function waitForSearchResults(searchValue, beforeResultsKey) {
+		const expectedQuery = normalizeText(searchValue);
+		return waitFor(() => {
+			const currentQuery = normalizeText(getCurrentSearchQuery());
+			const visibleResults = hasVisibleSearchResults();
+			if (currentQuery && currentQuery === expectedQuery && visibleResults) {
+				return true;
+			}
+			const afterResultsKey = getFirstVisibleResultKey();
+			return (
+				visibleResults &&
+				afterResultsKey &&
+				afterResultsKey !== beforeResultsKey
+			);
+		}, 10000);
+	}
+
 	function getElementText(el) {
 		if (!el) return "";
 		return [el.textContent, el.getAttribute("title"), el.getAttribute("aria-label")]
@@ -610,10 +651,6 @@
 				setTimeout(check, 200);
 			})();
 		});
-	}
-	// Sleep utility
-	function sleep(ms) {
-		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
 	// Observe DOM changes to inject the import button when needed
