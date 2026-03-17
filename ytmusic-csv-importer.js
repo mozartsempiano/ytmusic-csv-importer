@@ -18,16 +18,52 @@
 		if (debug) console.log("[YT CSV IMPORT]", ...args);
 	}
 
-	const LANG = (() => {
-		const l = document.documentElement.lang || navigator.language || "en";
-		if (l.startsWith("pt")) return "pt";
-		if (l.startsWith("es")) return "es";
+	function mapLanguage(lang) {
+		const normalized = (lang || "").toString().toLowerCase().replace("_", "-");
+		if (normalized.startsWith("pt")) return "pt";
+		if (normalized.startsWith("es")) return "es";
 		return "en";
+	}
+
+	const LANG_INFO = (() => {
+		const htmlLang = document.documentElement.lang || "";
+		const navigatorLang = navigator.language || "";
+		const navigatorLanguages = Array.isArray(navigator.languages)
+			? navigator.languages
+			: [];
+		const urlLang = new URLSearchParams(window.location.search).get("hl") || "";
+		const ytcfgLang =
+			window.ytcfg?.get?.("HL") ||
+			window.ytcfg?.data_?.HL ||
+			window.ytcfg?.data_?.HL_LOCALE ||
+			"";
+
+		const sourceCandidates = [
+			ytcfgLang,
+			urlLang,
+			htmlLang,
+			...navigatorLanguages,
+			navigatorLang,
+			"en",
+		].filter(Boolean);
+
+		const raw = sourceCandidates[0] || "en";
+		const mapped = mapLanguage(raw);
+		return {
+			raw,
+			mapped,
+			ytcfgLang,
+			urlLang,
+			htmlLang,
+			navigatorLang,
+			navigatorLanguages,
+		};
 	})();
+
+	const LANG = LANG_INFO.mapped;
 	if (debug)
 		log("Idioma detectado:", {
-			htmlLang: document.documentElement.lang,
-			navigatorLang: navigator.language,
+			...LANG_INFO,
 			usadoPeloScript: LANG,
 		});
 
@@ -64,6 +100,38 @@
 	};
 
 	const t = (k) => I18N[LANG]?.[k] || I18N.en[k];
+	const SONGS_FILTER_TERMS = ["Songs", "Musicas", "Canciones"];
+	const SAVE_TO_PLAYLIST_TERMS = [
+		"Save to playlist",
+		"Add to playlist",
+		"Salvar na playlist",
+		"Adicionar a playlist",
+		"Guardar en la playlist",
+		"Agregar a la playlist",
+	];
+	const MENU_BUTTON_TERMS = [
+		"More actions",
+		"Action menu",
+		"Mais acoes",
+		"Menu de acoes",
+		"Mas acciones",
+		"Acciones",
+	];
+	const SAVE_ACTION_TERMS = ["save", "add", "salvar", "adicionar", "guardar", "agregar"];
+
+	function normalizeText(value = "") {
+		return value
+			.toString()
+			.toLowerCase()
+			.normalize("NFD")
+			.replace(/[\u0300-\u036f]/g, "")
+			.trim();
+	}
+
+	function hasTerm(value, terms) {
+		const normalizedValue = normalizeText(value);
+		return terms.some((term) => normalizedValue.includes(normalizeText(term)));
+	}
 
 	// Adds the import button to the playlist creation modal header
 	function addImportButton() {
@@ -241,7 +309,7 @@
 		const searchBox = document.querySelector(".ytmusic-search-box input");
 		if (!searchBox) {
 			if (debug) log("Search bar not found");
-			return;
+			return false;
 		}
 		const searchValue = `${trackName} ${artist}`;
 		await sleep(1000);
@@ -322,42 +390,214 @@
 			10000,
 		);
 		await sleep(1000);
-		// Find the 'Save to playlist' button using main classes and containers
-		const saveBtn = Array.from(
-			document.querySelectorAll(
-				'button[aria-label*="' + t("saveToPlaylist") + '"]',
-			),
-		).find((btn) => btn.offsetParent !== null);
-		if (saveBtn) {
-			if (debug) log("Clicking 'Save to playlist'");
-			saveBtn.click();
-			await waitFor(() => document.querySelector("#playlists"), 5000).catch(
-				() => {},
-			);
-			const playlistBtn = Array.from(
-				document.querySelectorAll(
-					"#playlists ytmusic-playlist-add-to-option-renderer button",
-				),
-			).find(
-				(btn) =>
-					btn.textContent.trim() === playlistName.trim() ||
-					btn.getAttribute("aria-label")?.trim() === playlistName.trim(),
-			);
-			if (playlistBtn) {
-				if (debug) log(`Clicking playlist: ${playlistName}`);
-				playlistBtn.click();
-				await sleep(200);
-				return true;
-			} else {
-				if (debug) log(`Playlist '${playlistName}' not found in modal`);
-				return false;
-			}
-		} else {
-			if (debug) log("'Save to playlist' button not found");
+		await clickSongsFilter();
+		const saveDialogOpened = await openSaveToPlaylistDialog(trackName, artist);
+		if (!saveDialogOpened) {
+			if (debug) log("Could not open 'Save to playlist' action");
 			return false;
 		}
-		await sleep(200);
+
+		await waitFor(() => document.querySelector("#playlists"), 5000).catch(
+			() => {},
+		);
+		const playlistBtn = Array.from(
+			document.querySelectorAll(
+				"#playlists ytmusic-playlist-add-to-option-renderer button",
+			),
+		).find(
+			(btn) =>
+				btn.textContent.trim() === playlistName.trim() ||
+				btn.getAttribute("aria-label")?.trim() === playlistName.trim(),
+		);
+		if (playlistBtn) {
+			if (debug) log(`Clicking playlist: ${playlistName}`);
+			playlistBtn.click();
+			await sleep(200);
+			return true;
+		}
+
+		if (debug) log(`Playlist '${playlistName}' not found in modal`);
 		return false;
+	}
+
+	async function clickSongsFilter() {
+		const chipSelector = [
+			"a.yt-simple-endpoint.ytmusic-chip-cloud-chip-renderer",
+			"ytmusic-chip-cloud-chip-renderer a.yt-simple-endpoint",
+			"ytmusic-chip-cloud-chip-renderer",
+		].join(", ");
+
+		await waitFor(() => document.querySelector(chipSelector), 5000).catch(
+			() => {},
+		);
+		const chips = Array.from(document.querySelectorAll(chipSelector));
+		const songsChip = chips.find((chip) => {
+			const content = [
+				chip.textContent,
+				chip.getAttribute?.("title"),
+				chip.getAttribute?.("aria-label"),
+			]
+				.filter(Boolean)
+				.join(" ");
+			return hasTerm(content, SONGS_FILTER_TERMS);
+		});
+
+		if (!songsChip) {
+			if (debug) log("Songs filter chip not found");
+			return false;
+		}
+		if (songsChip.getAttribute?.("aria-selected") === "true") {
+			if (debug) log("Songs filter already selected");
+			return true;
+		}
+
+		if (debug) log("Clicking songs filter chip");
+		songsChip.click();
+		await waitFor(
+			() => songsChip.getAttribute?.("aria-selected") === "true",
+			3000,
+		).catch(() => {});
+		await sleep(700);
+		return true;
+	}
+
+	async function openSaveToPlaylistDialog(trackName, artist) {
+		const directSaveBtn = Array.from(document.querySelectorAll("button")).find(
+			(btn) =>
+				isVisible(btn) &&
+				hasTerm(getElementText(btn), [t("saveToPlaylist"), ...SAVE_TO_PLAYLIST_TERMS]),
+		);
+		if (directSaveBtn) {
+			if (debug) log("Clicking direct 'Save to playlist' button");
+			directSaveBtn.click();
+			return true;
+		}
+
+		if (debug)
+			log("Direct save button not visible; trying track three-dot menu...");
+		const results = Array.from(
+			document.querySelectorAll("ytmusic-responsive-list-item-renderer"),
+		).filter(isVisible);
+		if (!results.length) {
+			if (debug) log("No visible search results to open menu from");
+			return false;
+		}
+
+		const targetResult = pickBestResult(results, trackName, artist);
+		const menuBtn = findResultMenuButton(targetResult);
+		if (!menuBtn) {
+			if (debug) log("Three-dot menu button not found on target result");
+			return false;
+		}
+
+		if (debug) log("Opening three-dot menu of selected result");
+		menuBtn.click();
+		await waitFor(() => getMenuActionEntries().length > 0, 5000).catch(
+			() => {},
+		);
+
+		const saveAction = findSaveToPlaylistMenuItem();
+		if (!saveAction) {
+			if (debug) log("Save/Add to playlist option not found in action menu");
+			if (debug) log("Visible action menu options:", getVisibleMenuOptionTexts());
+			return false;
+		}
+
+		if (debug) log("Clicking save/add to playlist action in menu");
+		saveAction.click();
+		return true;
+	}
+
+	function pickBestResult(results, trackName, artist) {
+		const trackTokens = normalizeText(trackName)
+			.split(/\s+/)
+			.filter(Boolean);
+		const artistTokens = normalizeText(artist)
+			.split(/[;,&/ ]+/)
+			.filter(Boolean);
+
+		let best = results[0];
+		let bestScore = -1;
+		for (const result of results) {
+			const text = normalizeText(result.textContent);
+			let score = 0;
+			if (text.includes(normalizeText(trackName))) score += 5;
+			for (const token of trackTokens.slice(0, 4)) {
+				if (token.length > 2 && text.includes(token)) score += 1;
+			}
+			for (const token of artistTokens.slice(0, 3)) {
+				if (token.length > 2 && text.includes(token)) score += 1;
+			}
+			if (score > bestScore) {
+				best = result;
+				bestScore = score;
+			}
+		}
+		return best;
+	}
+
+	function findResultMenuButton(resultNode) {
+		if (!resultNode) return null;
+		const menuSelectors = [
+			"ytmusic-menu-renderer tp-yt-paper-icon-button",
+			"ytmusic-menu-renderer button",
+			'tp-yt-paper-icon-button[aria-label]',
+			'button[aria-label]',
+		].join(", ");
+		const buttons = Array.from(resultNode.querySelectorAll(menuSelectors)).filter(
+			isVisible,
+		);
+		return (
+			buttons.find((btn) => hasTerm(getElementText(btn), MENU_BUTTON_TERMS)) ||
+			buttons[0] ||
+			null
+		);
+	}
+
+	function findSaveToPlaylistMenuItem() {
+		const menuEntries = getMenuActionEntries();
+		const exactMatch = menuEntries.find((entry) =>
+			hasTerm(entry.text, [t("saveToPlaylist"), ...SAVE_TO_PLAYLIST_TERMS]),
+		);
+		if (exactMatch) return exactMatch.clickTarget;
+
+		const fuzzyMatch = menuEntries.find(
+			(entry) =>
+				hasTerm(entry.text, ["playlist"]) &&
+				hasTerm(entry.text, SAVE_ACTION_TERMS),
+		);
+		return fuzzyMatch?.clickTarget || null;
+	}
+
+	function getVisibleMenuOptionTexts() {
+		return getMenuActionEntries().map((entry) => entry.text);
+	}
+
+	function getMenuActionEntries() {
+		const items = Array.from(
+			document.querySelectorAll("ytmusic-menu-popup-renderer [role='menuitem']"),
+		);
+		return items
+			.map((item) => {
+				const text = getElementText(item).replace(/\s+/g, " ").trim();
+				const clickTarget =
+					item.querySelector(
+						"a.yt-simple-endpoint, tp-yt-paper-item#primary-entry, tp-yt-paper-item, button, [role='option']",
+					) || item;
+				return { text, clickTarget, item };
+			})
+			.filter((entry) => entry.text);
+	}
+
+	function getElementText(el) {
+		if (!el) return "";
+		return [el.textContent, el.getAttribute("title"), el.getAttribute("aria-label")]
+			.filter(Boolean)
+			.join(" ");
+	}
+
+	function isVisible(el) {
+		return !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
 	}
 
 	// Waits for a condition to be true or times out
